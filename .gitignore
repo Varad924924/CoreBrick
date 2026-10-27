@@ -1,0 +1,46 @@
+﻿# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+backend/.venv/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Frontend dependencies and build output
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Uploads, local backups, and generated files
+backend/uploads/
+uploads/
+backups/
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Local IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local inspection artifacts
+/frontend-inspect.txt
+/tests/diagnose_*.py
+/tests/inspect_*.py
