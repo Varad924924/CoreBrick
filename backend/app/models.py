@@ -36,6 +36,12 @@ class User(Base):
         String(255),
         nullable=False,
     )
+    google_sub: Mapped[str | None] = mapped_column(
+        String(255),
+        unique=True,
+        index=True,
+        nullable=True,
+    )
     role: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
@@ -571,6 +577,10 @@ class ArchitectSignupChallenge(Base):
     password_hash: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
+    )
+    google_sub: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
     )
     otp_hash: Mapped[str] = mapped_column(
         String(64),

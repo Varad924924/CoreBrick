@@ -1,8 +1,8 @@
 
 from uuid import UUID
-
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from decimal import Decimal
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -142,12 +142,260 @@ def list_my_projects(
 
 @router.get("/public", response_model=list[ProjectOut])
 def list_public_projects(
+    search: str | None = Query(default=None, max_length=120),
+
+    min_plot_area_sqft: int | None = Query(default=None, ge=1),
+    max_plot_area_sqft: int | None = Query(default=None, ge=1),
+
+    min_budget_inr: Decimal | None = Query(default=None, ge=0),
+    max_budget_inr: Decimal | None = Query(default=None, ge=0),
+
+    bhk: int | None = Query(default=None, ge=1, le=20),
+    floor_count: int | None = Query(default=None, ge=1, le=100),
+
+    facing: str | None = Query(default=None, max_length=20),
+    architectural_style: str | None = Query(default=None, max_length=80),
+    property_type: str | None = Query(default=None, max_length=50),
+
+    city: str | None = Query(default=None, max_length=100),
+    state: str | None = Query(default=None, max_length=100),
+    sort_by: str = Query(default="newest", max_length=30),
+
+    # Advanced plot dimensions
+    min_plot_width_ft: Decimal | None = Query(default=None, ge=0),
+    max_plot_width_ft: Decimal | None = Query(default=None, ge=0),
+    min_plot_length_ft: Decimal | None = Query(default=None, ge=0),
+    max_plot_length_ft: Decimal | None = Query(default=None, ge=0),
+
+    # Advanced area filters
+    min_area_sqft: int | None = Query(default=None, ge=1),
+    max_area_sqft: int | None = Query(default=None, ge=1),
+    min_carpet_area_sqft: int | None = Query(default=None, ge=1),
+    max_carpet_area_sqft: int | None = Query(default=None, ge=1),
+
+    # Room and parking requirements
+    bedroom_count: int | None = Query(default=None, ge=0, le=100),
+    bathroom_count: int | None = Query(default=None, ge=0, le=100),
+    parking_spaces: int | None = Query(default=None, ge=0, le=100),
+
+    # Entrance direction
+    entrance_facing: str | None = Query(default=None, max_length=20),
+
     db: Session = Depends(get_db),
 ):
+    """
+    Public design discovery.
+
+    Only approved projects are returned.
+    All filters are optional, so the existing public listing
+    continues to work without query parameters.
+    """
+
+    if (
+        min_plot_area_sqft is not None
+        and max_plot_area_sqft is not None
+        and min_plot_area_sqft > max_plot_area_sqft
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Minimum plot area cannot exceed maximum plot area.",
+        )
+
+    if (
+        min_budget_inr is not None
+        and max_budget_inr is not None
+        and min_budget_inr > max_budget_inr
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Minimum budget cannot exceed maximum budget.",
+        )
+
+    range_filters = (
+        ("plot width", min_plot_width_ft, max_plot_width_ft),
+        ("plot length", min_plot_length_ft, max_plot_length_ft),
+        ("built-up area", min_area_sqft, max_area_sqft),
+        ("carpet area", min_carpet_area_sqft, max_carpet_area_sqft),
+    )
+
+    for label, minimum, maximum in range_filters:
+        if (
+            minimum is not None
+            and maximum is not None
+            and minimum > maximum
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Minimum {label} cannot exceed maximum {label}.",
+            )
+
+    stmt = select(Project).where(
+        Project.status == "approved"
+    )
+
+    # General search across project information.
+    if search and search.strip():
+        pattern = f"%{search.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Project.title.ilike(pattern),
+                Project.description.ilike(pattern),
+                Project.city.ilike(pattern),
+                Project.state.ilike(pattern),
+                Project.property_type.ilike(pattern),
+                Project.architectural_style.ilike(pattern),
+            )
+        )
+
+    # Plot area filters.
+    if min_plot_area_sqft is not None:
+        stmt = stmt.where(
+            Project.plot_area_sqft >= min_plot_area_sqft
+        )
+
+    if max_plot_area_sqft is not None:
+        stmt = stmt.where(
+            Project.plot_area_sqft <= max_plot_area_sqft
+        )
+
+        # Plot width filters.
+    if min_plot_width_ft is not None:
+        stmt = stmt.where(
+            Project.plot_width_ft >= min_plot_width_ft
+        )
+
+    if max_plot_width_ft is not None:
+        stmt = stmt.where(
+            Project.plot_width_ft <= max_plot_width_ft
+        )
+
+    # Plot length filters.
+    if min_plot_length_ft is not None:
+        stmt = stmt.where(
+            Project.plot_length_ft >= min_plot_length_ft
+        )
+
+    if max_plot_length_ft is not None:
+        stmt = stmt.where(
+            Project.plot_length_ft <= max_plot_length_ft
+        )
+
+    # Built-up area filters.
+    if min_area_sqft is not None:
+        stmt = stmt.where(
+            Project.area_sqft >= min_area_sqft
+        )
+
+    if max_area_sqft is not None:
+        stmt = stmt.where(
+            Project.area_sqft <= max_area_sqft
+        )
+
+    # Carpet area filters.
+    if min_carpet_area_sqft is not None:
+        stmt = stmt.where(
+            Project.carpet_area_sqft >= min_carpet_area_sqft
+        )
+
+    if max_carpet_area_sqft is not None:
+        stmt = stmt.where(
+            Project.carpet_area_sqft <= max_carpet_area_sqft
+        )
+
+    # Room and parking filters.
+    if bedroom_count is not None:
+        stmt = stmt.where(
+            Project.bedroom_count == bedroom_count
+        )
+
+    if bathroom_count is not None:
+        stmt = stmt.where(
+            Project.bathroom_count == bathroom_count
+        )
+
+    if parking_spaces is not None:
+        stmt = stmt.where(
+            Project.parking_spaces == parking_spaces
+        )
+
+    # Entrance direction filter.
+    if entrance_facing and entrance_facing.strip():
+        stmt = stmt.where(
+            Project.entrance_facing.ilike(
+                f"%{entrance_facing.strip()}%"
+            )
+        )
+
+    # Construction budget filters in INR.
+    # The estimated project cost ranges must overlap
+    # the customer's selected budget range.
+    if min_budget_inr is not None:
+        stmt = stmt.where(
+            Project.estimated_cost_max >= min_budget_inr
+        )
+
+    if max_budget_inr is not None:
+        stmt = stmt.where(
+            Project.estimated_cost_min <= max_budget_inr
+        )
+
+    # Building requirements.
+    if bhk is not None:
+        stmt = stmt.where(Project.bhk == bhk)
+
+    if floor_count is not None:
+        stmt = stmt.where(Project.floor_count == floor_count)
+
+    # Architectural preferences.
+    if facing and facing.strip():
+        stmt = stmt.where(
+            Project.facing.ilike(f"%{facing.strip()}%")
+        )
+
+    if architectural_style and architectural_style.strip():
+        stmt = stmt.where(
+            Project.architectural_style.ilike(
+                f"%{architectural_style.strip()}%"
+            )
+        )
+
+    if property_type and property_type.strip():
+        stmt = stmt.where(
+            Project.property_type.ilike(
+                f"%{property_type.strip()}%"
+            )
+        )
+
+    # Location filters.
+    if city and city.strip():
+        stmt = stmt.where(
+            Project.city.ilike(f"%{city.strip()}%")
+        )
+
+    if state and state.strip():
+        stmt = stmt.where(
+            Project.state.ilike(f"%{state.strip()}%")
+        )
+
+    sort_options = {
+        "newest": Project.created_at.desc(),
+        "budget_low": Project.estimated_cost_min.asc().nulls_last(),
+        "budget_high": Project.estimated_cost_max.desc().nulls_last(),
+        "plot_small": Project.plot_area_sqft.asc().nulls_last(),
+        "plot_large": Project.plot_area_sqft.desc().nulls_last(),
+    }
+
+    if sort_by not in sort_options:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid sort option.",
+        )
+
     return db.scalars(
-        select(Project)
-        .where(Project.status == "approved")
-        .order_by(Project.created_at.desc())
+        stmt.order_by(
+            sort_options[sort_by],
+            Project.created_at.desc(),
+        )
     ).all()
 
 

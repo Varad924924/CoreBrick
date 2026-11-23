@@ -231,6 +231,12 @@ class ProjectFloorOut(BaseModel):
     sort_order: int = 0
     created_at: datetime
 
+class CompanyEnquiryDetails(BaseModel):
+    enquiry: CompanyEnquiryItem
+    project: ProjectOut | None = None
+    architect: ArchitectReviewItem | None = None
+    floors: list[ProjectFloorOut] = Field(default_factory=list)
+
 
 class SiteVisitCreate(BaseModel):
     project_id: UUID

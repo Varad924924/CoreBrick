@@ -17,3 +17,9 @@ class ArchitectSignupComplete(BaseModel):
     full_name: str = Field(min_length=2, max_length=150)
     phone: str = Field(min_length=7, max_length=30)
     bio: str | None = Field(default=None, max_length=5000)
+
+
+class ArchitectGoogleCredentialRequest(BaseModel):
+    """Google Identity Services ID-token request."""
+
+    credential: str = Field(min_length=20, max_length=8192)

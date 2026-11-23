@@ -10,6 +10,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
     status,
+    Body,
 )
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
@@ -17,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
-from app.models import ArchitectProfile, Project, ProjectImage, User
+from app.models import ArchitectProfile, Project, ProjectImage, User,ProjectFloor
 from app.schemas import ProjectImageOut
 
 
@@ -351,6 +352,59 @@ async def replace_rejected_project_image(
         destination.unlink(missing_ok=True)
         raise
 
+@router.patch(
+    "/mine/{project_id}/images/{image_id}/floor",
+    response_model=ProjectImageOut,
+)
+def update_project_image_floor(
+    project_id: UUID,
+    image_id: UUID,
+    floor_id: UUID | None = Body(default=None, embed=True),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Assign or remove a floor association for an existing project image."""
+
+    project = get_owned_project(project_id, user, db)
+
+    image_record = db.get(ProjectImage, image_id)
+
+    if image_record is None or image_record.project_id != project.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project image not found",
+        )
+
+    if floor_id is not None:
+        floor = db.get(ProjectFloor, floor_id)
+
+        if floor is None or floor.project_id != project.id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Floor not found for this project",
+            )
+
+    try:
+        image_record.floor_id = floor_id
+
+        # A changed image-floor association requires fresh review.
+        image_record.review_status = "pending_review"
+        image_record.review_notes = None
+        image_record.reviewed_at = None
+
+        project.status = "pending_review"
+        project.reviewed_by_user_id = None
+        project.reviewed_at = None
+        project.review_notes = None
+
+        db.commit()
+        db.refresh(image_record)
+
+        return image_response(image_record, private=True)
+
+    except Exception:
+        db.rollback()
+        raise
 
 @router.delete("/mine/{project_id}/images/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_my_project_image(

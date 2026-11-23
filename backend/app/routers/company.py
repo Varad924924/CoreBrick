@@ -6,7 +6,15 @@ from sqlalchemy.orm import Session
 
 from app.audit import record_audit_log
 from app.dependencies import get_current_company, get_db
-from app.models import AuditLog, ArchitectProfile, Enquiry, Project, SiteVisit, User
+from app.models import (
+    AuditLog,
+    ArchitectProfile,
+    Enquiry,
+    Project,
+    ProjectFloor,
+    SiteVisit,
+    User,
+)
 from app.schemas import (
     ArchitectReviewItem,
     AuditLogItem,
@@ -14,6 +22,9 @@ from app.schemas import (
     CompanySiteVisitItem,
     EnquiryStatusUpdate,
     SiteVisitStatusUpdate,
+    CompanyEnquiryDetails,
+    ProjectFloorOut,
+    ProjectOut,
 )
 
 
@@ -188,6 +199,87 @@ def list_company_enquiries(
         for enquiry, project in rows
     ]
 
+@router.get(
+    "/enquiries/{enquiry_id}/details",
+    response_model=CompanyEnquiryDetails,
+)
+def get_company_enquiry_details(
+    enquiry_id: UUID,
+    company_user: User = Depends(get_current_company),
+    db: Session = Depends(get_db),
+):
+    # Get enquiry
+    enquiry = db.get(Enquiry, enquiry_id)
+
+    if enquiry is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Enquiry not found",
+        )
+
+    enquiry_details = CompanyEnquiryItem(
+        id=enquiry.id,
+        project_id=enquiry.project_id,
+        project_title=None,
+        customer_profile_id=enquiry.customer_profile_id,
+        customer_name=enquiry.customer_name,
+        customer_email=enquiry.customer_email,
+        customer_phone=enquiry.customer_phone,
+        subject=enquiry.subject,
+        message=enquiry.message,
+        status=enquiry.status,
+        created_at=enquiry.created_at,
+        updated_at=enquiry.updated_at,
+    )
+
+    project_details = None
+    architect_details = None
+    floor_details = []
+
+    # Load linked project and architect.
+    if enquiry.project_id is not None:
+        project_record = db.get(Project, enquiry.project_id)
+
+        if project_record is not None:
+            project_details = ProjectOut.model_validate(project_record)
+
+            enquiry_details = enquiry_details.model_copy(
+                update={"project_title": project_record.title}
+            )
+
+            # Architect associated with this project.
+            profile = db.get(
+                ArchitectProfile,
+                project_record.architect_profile_id,
+            )
+
+            if profile is not None:
+                architect_user = db.get(User, profile.user_id)
+
+                if architect_user is not None:
+                    architect_details = build_review_item(
+                        profile,
+                        architect_user,
+                    )
+
+            # Floor breakdown.
+            floor_details = db.scalars(
+                select(ProjectFloor)
+                .where(
+                    ProjectFloor.project_id == project_record.id
+                )
+                .order_by(
+                    ProjectFloor.sort_order.asc(),
+                    ProjectFloor.floor_number.asc(),
+                )
+            ).all()
+
+    return CompanyEnquiryDetails(
+        enquiry=enquiry_details,
+        project=project_details,
+        architect=architect_details,
+        floors=floor_details,
+    )
 
 @router.patch(
     "/enquiries/{enquiry_id}",

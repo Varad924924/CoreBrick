@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState, type FormEvent } from "react";
+﻿﻿import { useEffect, useRef, useState, type FormEvent } from "react";
 import "./corebrick-dashboard-theme.css";
 import ArchitectSignup from "./ArchitectSignup";
 
@@ -114,6 +114,33 @@ type ProjectImage = {
   review_notes: string | null;
   reviewed_at: string | null;
   preview_url?: string;
+};
+
+type ProjectFloor = {
+  id: string;
+  project_id: string;
+  floor_name: string;
+  floor_number: number;
+  description: string | null;
+  area_sqft: number | null;
+  sort_order: number;
+  created_at: string;
+};
+
+type FloorDraft = {
+  floor_name: string;
+  floor_number: string;
+  description: string;
+  area_sqft: string;
+  sort_order: string;
+};
+
+const EMPTY_FLOOR_DRAFT: FloorDraft = {
+  floor_name: "",
+  floor_number: "",
+  description: "",
+  area_sqft: "",
+  sort_order: "0",
 };
 
 type CreationImageDraft = {
@@ -280,11 +307,24 @@ function ArchitectDashboard() {
   const [selectedFiles, setSelectedFiles] = useState<Record<string, File[]>>({});
   const [altTexts, setAltTexts] = useState<Record<string, string>>({});
   const [imageCategories, setImageCategories] = useState<Record<string, string>>({});
+  const [selectedFloorByProject, setSelectedFloorByProject] = useState<
+  Record<string, string>
+>({});
+  const [updatingFloorImageId, setUpdatingFloorImageId] = useState("");
   const [coverSelections, setCoverSelections] = useState<Record<string, boolean>>({});
   const [replacementFiles, setReplacementFiles] = useState<Record<string, File | null>>({});
   const [replacingImageId, setReplacingImageId] = useState("");
   const [deletingImageId, setDeletingImageId] = useState("");
   const [imagesByProject, setImagesByProject] = useState<Record<string, ProjectImage[]>>({});
+  const [floorsByProject, setFloorsByProject] = useState<
+  Record<string, ProjectFloor[]>
+>({});
+  const [floorDraftsByProject, setFloorDraftsByProject] = useState<
+  Record<string, FloorDraft>
+>({});
+  const [editingFloorId, setEditingFloorId] = useState<string | null>(null);
+  const [floorEditDraftsById, setFloorEditDraftsById] = useState<Record<string, FloorDraft>>({});
+  const [savingFloorId, setSavingFloorId] = useState("");
   const [coverImageUrls, setCoverImageUrls] = useState<Record<string, string>>({});
   const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
   const [loginLoading, setLoginLoading] = useState(false);
@@ -341,6 +381,16 @@ function ArchitectDashboard() {
           throw new Error("Please sign in with an active Architect account.");
         }
         setProfile(currentUser);
+
+        if (currentUser.architect_approval_status === "approved") {
+          setNotice("Your architect account has been approved by Core Brick.");
+        } else if (currentUser.architect_approval_status === "pending") {
+          setNotice("Your architect account was created and is awaiting Company approval.");
+        } else if (currentUser.architect_approval_status === "rejected") {
+          setNotice("Your architect application was rejected. Please contact Core Brick for next steps.");
+        } else {
+          setNotice("");
+        }
 
         const projectsData = await readResponse(projectsResponse);
         if (!projectsResponse.ok) {
@@ -482,12 +532,239 @@ function ArchitectDashboard() {
       (previewUrls.current[projectId] ?? []).forEach((url) => URL.revokeObjectURL(url));
       previewUrls.current[projectId] = nextUrls;
       setImagesByProject((current) => ({ ...current, [projectId]: previews }));
+      const floorResponse = await fetch(
+        `${API_URL}/projects/mine/${projectId}/floors`,
+        { headers, cache: "no-store" },
+      );
+
+      const floorData = await readResponse(floorResponse);
+
+      if (!floorResponse.ok) {
+        throw new Error(
+          readableError(floorData, `Unable to load floors (${floorResponse.status}).`),
+        );
+      }
+
+      setFloorsByProject((current) => ({
+        ...current,
+        [projectId]: floorData as ProjectFloor[],
+      }));
+
+
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load project floors and images.");
     } finally {
       setAssetLoadingId("");
     }
   }
+
+  async function createProjectFloor(projectId: string) {
+  const draft = floorDraftsByProject[projectId] ?? EMPTY_FLOOR_DRAFT;
+
+  if (!token || profile?.architect_approval_status !== "approved") {
+    setError("An approved architect account is required.");
+    return;
+  }
+
+  const floorName = draft.floor_name.trim();
+  const floorNumber = Number(draft.floor_number);
+  const area = draft.area_sqft.trim() === ""
+    ? null
+    : Number(draft.area_sqft);
+  const sortOrder = Number(draft.sort_order || "0");
+
+  if (!floorName) {
+    setError("Please enter a floor name.");
+    return;
+  }
+
+  if (
+    draft.floor_number.trim() === "" ||
+    !Number.isInteger(floorNumber) ||
+    floorNumber < -10 ||
+    floorNumber > 200
+  ) {
+    setError("Floor number must be an integer between -10 and 200.");
+    return;
+  }
+
+  if (
+    area !== null &&
+    (!Number.isInteger(area) || area <= 0)
+  ) {
+    setError("Floor area must be a positive whole number.");
+    return;
+  }
+
+  if (!Number.isInteger(sortOrder) || sortOrder < 0) {
+    setError("Sort order must be a non-negative integer.");
+    return;
+  }
+
+  setSavingFloorId(projectId);
+  setError("");
+  setNotice("");
+
+  try {
+    await apiRequest<ProjectFloor>(
+      `/projects/${projectId}/floors`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          floor_name: floorName,
+          floor_number: floorNumber,
+          description: draft.description.trim() || null,
+          area_sqft: area,
+          sort_order: sortOrder,
+        }),
+      },
+    );
+
+    setFloorDraftsByProject((current) => ({
+      ...current,
+      [projectId]: EMPTY_FLOOR_DRAFT,
+    }));
+
+    setNotice("Floor added successfully. The project is pending Company review.");
+
+    await loadProjectAssets(projectId);
+    setRefreshKey((current) => current + 1);
+  } catch (err) {
+    setError(
+      err instanceof Error ? err.message : "Unable to add project floor.",
+    );
+  } finally {
+    setSavingFloorId("");
+  }
+}
+
+  async function updateProjectFloor(projectId: string, floorId: string) {
+  const draft = floorEditDraftsById[floorId];
+
+  if (!token || !draft) return;
+
+  if (profile?.architect_approval_status !== "approved") {
+    setError("An approved architect account is required.");
+    return;
+  }
+
+  const floorName = draft.floor_name.trim();
+  const floorNumber = Number(draft.floor_number);
+  const area = draft.area_sqft.trim() === ""
+    ? null
+    : Number(draft.area_sqft);
+  const sortOrder = Number(draft.sort_order || "0");
+
+  if (!floorName) {
+    setError("Please enter a floor name.");
+    return;
+  }
+
+  if (
+    draft.floor_number.trim() === "" ||
+    !Number.isInteger(floorNumber) ||
+    floorNumber < -10 ||
+    floorNumber > 200
+  ) {
+    setError("Enter a valid floor number between -10 and 200.");
+    return;
+  }
+
+  if (area !== null && (!Number.isInteger(area) || area <= 0)) {
+    setError("Floor area must be a positive whole number.");
+    return;
+  }
+
+  if (!Number.isInteger(sortOrder) || sortOrder < 0) {
+    setError("Sort order must be a non-negative integer.");
+    return;
+  }
+
+  setSavingFloorId(projectId);
+  setError("");
+  setNotice("");
+
+  try {
+    await apiRequest<ProjectFloor>(
+      `/projects/${projectId}/floors/${floorId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          floor_name: floorName,
+          floor_number: floorNumber,
+          description: draft.description.trim() || null,
+          area_sqft: area,
+          sort_order: sortOrder,
+        }),
+      },
+    );
+
+    setEditingFloorId(null);
+
+    setFloorEditDraftsById((current) => {
+      const next = { ...current };
+      delete next[floorId];
+      return next;
+    });
+
+    setNotice("Floor details updated. The project is pending Company review.");
+
+    await loadProjectAssets(projectId);
+    setRefreshKey((current) => current + 1);
+  } catch (err) {
+    setError(
+      err instanceof Error ? err.message : "Unable to update floor details.",
+    );
+  } finally {
+    setSavingFloorId("");
+  }
+}
+
+  async function deleteProjectFloor(projectId: string, floor: ProjectFloor) {
+  if (!token || savingFloorId) return;
+
+  const confirmed = window.confirm(
+    `Delete "${floor.floor_name}"?\n\n` +
+    "Images assigned to this floor will be retained but become unassigned. " +
+    "The project will require Company review again.",
+  );
+
+  if (!confirmed) return;
+
+  setSavingFloorId(projectId);
+  setError("");
+  setNotice("");
+
+  try {
+    await apiRequest<void>(
+      `/projects/${projectId}/floors/${floor.id}`,
+      { method: "DELETE" },
+    );
+
+    setEditingFloorId((current) =>
+      current === floor.id ? null : current
+    );
+
+    setFloorEditDraftsById((current) => {
+      const next = { ...current };
+      delete next[floor.id];
+      return next;
+    });
+
+    setNotice(
+      "Floor deleted successfully. The project is pending Company review.",
+    );
+
+    await loadProjectAssets(projectId);
+    setRefreshKey((current) => current + 1);
+  } catch (err) {
+    setError(
+      err instanceof Error ? err.message : "Unable to delete floor.",
+    );
+  } finally {
+    setSavingFloorId("");
+  }
+}
 
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -766,6 +1043,45 @@ function ArchitectDashboard() {
     }
   }
 
+  async function updateImageFloor(
+  projectId: string,
+  image: ProjectImage,
+  floorId: string,
+) {
+  if (!token || updatingFloorImageId) return;
+
+  setUpdatingFloorImageId(image.id);
+  setError("");
+  setNotice("");
+
+  try {
+    await apiRequest<ProjectImage>(
+      `/projects/mine/${projectId}/images/${image.id}/floor`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          floor_id: floorId || null,
+        }),
+      },
+    );
+
+    setNotice(
+      "Image floor assignment updated. The project is pending Company review.",
+    );
+
+    await loadProjectAssets(projectId);
+    setRefreshKey((current) => current + 1);
+  } catch (err) {
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Unable to update image floor assignment.",
+    );
+  } finally {
+    setUpdatingFloorImageId("");
+  }
+}
+
   async function replaceRejectedImage(projectId: string, image: ProjectImage) {
     const file = replacementFiles[image.id];
     if (!token || !file || replacingImageId) return;
@@ -817,6 +1133,11 @@ function ArchitectDashboard() {
         formData.append("is_cover", String(Boolean(coverSelections[projectId]) && index === 0));
         const altText = altTexts[projectId]?.trim();
         if (altText) formData.append("alt_text", altText);
+        const floorId = selectedFloorByProject[projectId];
+
+if (floorId) {
+  formData.append("floor_id", floorId);
+}
         await apiRequest<ProjectImage>(`/projects/${projectId}/images`, {
           method: "POST",
           body: formData,
@@ -848,6 +1169,7 @@ function ArchitectDashboard() {
     setProfile(null);
     setProjects([]);
     setImagesByProject({});
+    setFloorsByProject({});
     setCoverImageUrls({});
     setExpandedProjectId(null);
     setNotice("");
@@ -862,6 +1184,14 @@ function ArchitectDashboard() {
           setShowSignup(false);
           setError("");
           setNotice("");
+        }}
+        onRegistered={(result) => {
+          sessionStorage.setItem(TOKEN_KEY, result.access_token);
+          setProfile(result.user);
+          setPassword("");
+          setShowSignup(false);
+          setNotice("Your architect account was created and is awaiting Company approval.");
+          setToken(result.access_token);
         }}
       />
     );
@@ -1242,6 +1572,7 @@ function ArchitectDashboard() {
           <div className="mt-5 grid grid-cols-1 items-start gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {projects.map((project) => {
               const images = imagesByProject[project.id] ?? [];
+              const floors = floorsByProject[project.id] ?? [];
               const isExpanded = expandedProjectId === project.id;
               const coverImageUrl = coverImageUrls[project.id];
               return (
@@ -1325,6 +1656,329 @@ function ArchitectDashboard() {
                     <div className="mt-7 space-y-8 border-t border-stone-200 pt-6">
                       {assetLoadingId === project.id && <p className="text-sm text-stone-500">Loading project images...</p>}
 
+                      <section className="rounded-xl border border-stone-200 bg-white p-4">
+  <div className="flex flex-wrap items-center justify-between gap-3">
+    <div>
+      <h4 className="text-lg font-semibold">Floor Management</h4>
+      <p className="mt-1 text-sm text-stone-500">
+        Add floor-wise details for this architectural project.
+      </p>
+    </div>
+    <span className="rounded-full bg-stone-100 px-3 py-1 text-xs font-semibold">
+      {floors.length} floor(s)
+    </span>
+  </div>
+
+  <div className="mt-4 space-y-3">
+    {floors.length > 0 ? (
+      floors.map((floor) => {
+  const editDraft = floorEditDraftsById[floor.id] ?? {
+    floor_name: floor.floor_name,
+    floor_number: String(floor.floor_number),
+    description: floor.description ?? "",
+    area_sqft: floor.area_sqft ? String(floor.area_sqft) : "",
+    sort_order: String(floor.sort_order),
+  };
+
+  const isEditing = editingFloorId === floor.id;
+
+  return (
+    <article
+      key={floor.id}
+      className="rounded-lg border border-stone-200 p-4"
+    >
+      <div className="flex flex-wrap gap-2">
+  <button
+    type="button"
+    className={secondaryButtonClass}
+    disabled={!approved || savingFloorId === project.id}
+    onClick={() => {
+      setFloorEditDraftsById((current) => ({
+        ...current,
+        [floor.id]: {
+          floor_name: floor.floor_name,
+          floor_number: String(floor.floor_number),
+          description: floor.description ?? "",
+          area_sqft: floor.area_sqft
+            ? String(floor.area_sqft)
+            : "",
+          sort_order: String(floor.sort_order),
+        },
+      }));
+      setEditingFloorId(floor.id);
+    }}
+  >
+    Edit Floor
+  </button>
+
+  <button
+    type="button"
+    className="rounded-full border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+    disabled={!approved || savingFloorId === project.id}
+    onClick={() => void deleteProjectFloor(project.id, floor)}
+  >
+    Delete Floor
+  </button>
+</div>
+      {floor.area_sqft && (
+        <p className="mt-2 text-sm text-stone-600">
+          Area: {floor.area_sqft.toLocaleString()} sq. ft.
+        </p>
+      )}
+
+      {floor.description && (
+        <p className="mt-1 text-sm text-stone-500">
+          {floor.description}
+        </p>
+      )}
+
+      {isEditing && (
+        <div className="mt-4 grid gap-3 border-t border-stone-200 pt-4 sm:grid-cols-2">
+          <label className={labelClass}>
+            Floor name *
+            <input
+              className={inputClass}
+              maxLength={100}
+              value={editDraft.floor_name}
+              onChange={(e) =>
+                setFloorEditDraftsById((current) => ({
+                  ...current,
+                  [floor.id]: {
+                    ...editDraft,
+                    floor_name: e.target.value,
+                  },
+                }))
+              }
+            />
+          </label>
+
+          <label className={labelClass}>
+            Floor number *
+            <input
+              type="number"
+              min="-10"
+              max="200"
+              step="1"
+              className={inputClass}
+              value={editDraft.floor_number}
+              onChange={(e) =>
+                setFloorEditDraftsById((current) => ({
+                  ...current,
+                  [floor.id]: {
+                    ...editDraft,
+                    floor_number: e.target.value,
+                  },
+                }))
+              }
+            />
+          </label>
+
+          <label className={labelClass}>
+            Floor area (sq. ft.)
+            <input
+              type="number"
+              min="1"
+              step="1"
+              className={inputClass}
+              value={editDraft.area_sqft}
+              onChange={(e) =>
+                setFloorEditDraftsById((current) => ({
+                  ...current,
+                  [floor.id]: {
+                    ...editDraft,
+                    area_sqft: e.target.value,
+                  },
+                }))
+              }
+            />
+          </label>
+
+          <label className={labelClass}>
+            Sort order
+            <input
+              type="number"
+              min="0"
+              step="1"
+              className={inputClass}
+              value={editDraft.sort_order}
+              onChange={(e) =>
+                setFloorEditDraftsById((current) => ({
+                  ...current,
+                  [floor.id]: {
+                    ...editDraft,
+                    sort_order: e.target.value,
+                  },
+                }))
+              }
+            />
+          </label>
+
+          <label className={`${labelClass} sm:col-span-2`}>
+            Description
+            <textarea
+              rows={3}
+              maxLength={2000}
+              className={inputClass}
+              value={editDraft.description}
+              onChange={(e) =>
+                setFloorEditDraftsById((current) => ({
+                  ...current,
+                  [floor.id]: {
+                    ...editDraft,
+                    description: e.target.value,
+                  },
+                }))
+              }
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2 sm:col-span-2">
+            <button
+              type="button"
+              className={buttonClass}
+              disabled={savingFloorId === project.id}
+              onClick={() =>
+                void updateProjectFloor(project.id, floor.id)
+              }
+            >
+              {savingFloorId === project.id
+                ? "Saving..."
+                : "Save Changes"}
+            </button>
+
+            <button
+              type="button"
+              className={secondaryButtonClass}
+              disabled={savingFloorId === project.id}
+              onClick={() => setEditingFloorId(null)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </article>
+  );
+})
+    ) : (
+      <p className="rounded-lg border border-dashed border-stone-300 p-4 text-sm text-stone-500">
+        No floors added yet.
+      </p>
+    )}
+  </div>
+
+  <div className="mt-5 border-t border-stone-200 pt-5">
+    <h5 className="font-semibold">Add New Floor</h5>
+
+    <div className="mt-3 grid gap-4 sm:grid-cols-2">
+      <label className={labelClass}>
+        Floor name *
+        <input
+          className={inputClass}
+          value={(floorDraftsByProject[project.id] ?? EMPTY_FLOOR_DRAFT).floor_name}
+          onChange={(e) => setFloorDraftsByProject((current) => ({
+            ...current,
+            [project.id]: {
+              ...(current[project.id] ?? EMPTY_FLOOR_DRAFT),
+              floor_name: e.target.value,
+            },
+          }))}
+          placeholder="e.g. Ground Floor"
+          maxLength={100}
+          disabled={!approved || savingFloorId === project.id}
+        />
+      </label>
+
+      <label className={labelClass}>
+        Floor number *
+        <input
+          type="number"
+          className={inputClass}
+          value={(floorDraftsByProject[project.id] ?? EMPTY_FLOOR_DRAFT).floor_number}
+          onChange={(e) => setFloorDraftsByProject((current) => ({
+            ...current,
+            [project.id]: {
+              ...(current[project.id] ?? EMPTY_FLOOR_DRAFT),
+              floor_number: e.target.value,
+            },
+          }))}
+          placeholder="0 for ground floor"
+          min="-10"
+          max="200"
+          step="1"
+          disabled={!approved || savingFloorId === project.id}
+        />
+      </label>
+
+      <label className={labelClass}>
+        Floor area (sq. ft.)
+        <input
+          type="number"
+          className={inputClass}
+          value={(floorDraftsByProject[project.id] ?? EMPTY_FLOOR_DRAFT).area_sqft}
+          onChange={(e) => setFloorDraftsByProject((current) => ({
+            ...current,
+            [project.id]: {
+              ...(current[project.id] ?? EMPTY_FLOOR_DRAFT),
+              area_sqft: e.target.value,
+            },
+          }))}
+          min="1"
+          step="1"
+          disabled={!approved || savingFloorId === project.id}
+        />
+      </label>
+
+      <label className={labelClass}>
+        Sort order
+        <input
+          type="number"
+          className={inputClass}
+          value={(floorDraftsByProject[project.id] ?? EMPTY_FLOOR_DRAFT).sort_order}
+          onChange={(e) => setFloorDraftsByProject((current) => ({
+            ...current,
+            [project.id]: {
+              ...(current[project.id] ?? EMPTY_FLOOR_DRAFT),
+              sort_order: e.target.value,
+            },
+          }))}
+          min="0"
+          step="1"
+          disabled={!approved || savingFloorId === project.id}
+        />
+      </label>
+
+      <label className={`${labelClass} sm:col-span-2`}>
+        Floor description
+        <textarea
+          className={inputClass}
+          rows={3}
+          maxLength={2000}
+          value={(floorDraftsByProject[project.id] ?? EMPTY_FLOOR_DRAFT).description}
+          onChange={(e) => setFloorDraftsByProject((current) => ({
+            ...current,
+            [project.id]: {
+              ...(current[project.id] ?? EMPTY_FLOOR_DRAFT),
+              description: e.target.value,
+            },
+          }))}
+          placeholder="Describe the rooms, layout, or features of this floor."
+          disabled={!approved || savingFloorId === project.id}
+        />
+      </label>
+    </div>
+
+    <button
+      type="button"
+      onClick={() => void createProjectFloor(project.id)}
+      disabled={!approved || savingFloorId === project.id}
+      className={`${buttonClass} mt-4`}
+    >
+      {savingFloorId === project.id ? "Adding Floor..." : "Add Floor"}
+    </button>
+  </div>
+</section>
+
                       <section>
                         <div className="flex flex-wrap items-end justify-between gap-3">
                           <div><h4 className="text-lg font-semibold">Project image gallery</h4><p className="mt-1 text-sm text-stone-500">Upload multiple drawings or photos. Maximum 5 MB each; JPEG, PNG or WebP.</p></div>
@@ -1335,12 +1989,53 @@ function ArchitectDashboard() {
                           <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                             {images.map((image) => {
                               const categoryLabel = IMAGE_CATEGORIES.find(([value]) => value === image.category)?.[1] ?? image.category;
+                              const assignedFloor = floors.find(
+  (floor) => floor.id === image.floor_id
+);
                               return (
                                 <article key={image.id} className="overflow-hidden rounded-xl border border-stone-200 bg-white">
                                   {image.preview_url ? <img src={image.preview_url} alt={image.alt_text ?? project.title} className="h-44 w-full bg-stone-100 object-cover" loading="lazy" /> : <div className="flex h-44 items-center justify-center bg-stone-100 text-sm text-stone-400">Preview unavailable</div>}
                                   <div className="space-y-1 p-3 text-sm">
                                     <p className="font-semibold">{categoryLabel}{image.is_cover ? <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-900">Cover</span> : null}</p>
-                                    <p className="text-stone-500">Project image</p>
+                                    <p className="text-stone-500">
+  {assignedFloor
+    ? `Floor: ${assignedFloor.floor_name}`
+    : "Not assigned to a floor"}
+</p>
+
+<label className="mt-3 block text-xs font-semibold text-stone-700">
+  Assign image to floor
+
+  <select
+    value={image.floor_id ?? ""}
+    onChange={(e) =>
+      void updateImageFloor(
+        project.id,
+        image,
+        e.target.value,
+      )
+    }
+    disabled={
+      !approved ||
+      updatingFloorImageId === image.id
+    }
+    className={inputClass}
+  >
+    <option value="">Not assigned to a floor</option>
+
+    {floors.map((floor) => (
+      <option key={floor.id} value={floor.id}>
+        {floor.floor_name}
+      </option>
+    ))}
+  </select>
+
+  {updatingFloorImageId === image.id && (
+    <span className="mt-1 block text-xs text-stone-500">
+      Updating floor assignment...
+    </span>
+  )}
+</label>
                                     {image.alt_text && <p className="text-stone-600">{image.alt_text}</p>}
                                     <div className="mt-2">
                                       <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold capitalize ${image.review_status === "approved" ? "bg-green-50 text-green-800" : image.review_status === "rejected" ? "bg-red-50 text-red-800" : "bg-amber-50 text-amber-800"}`}>
@@ -1401,6 +2096,28 @@ function ArchitectDashboard() {
                                 {IMAGE_CATEGORIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                               </select>
                             </label>
+                            <label className={labelClass}>
+  Assign to Floor
+  <select
+    value={selectedFloorByProject[project.id] ?? ""}
+    onChange={(e) =>
+      setSelectedFloorByProject((current) => ({
+        ...current,
+        [project.id]: e.target.value,
+      }))
+    }
+    disabled={!approved || uploadingId === project.id}
+    className={inputClass}
+  >
+    <option value="">Not assigned to a floor</option>
+
+    {floors.map((floor) => (
+      <option key={floor.id} value={floor.id}>
+        {floor.floor_name}
+      </option>
+    ))}
+  </select>
+</label>
                             <label className={`${labelClass} sm:col-span-2 lg:col-span-2`}>Image description (optional)
                               <input maxLength={255} value={altTexts[project.id] ?? ""} onChange={(e) => setAltTexts((current) => ({ ...current, [project.id]: e.target.value }))} disabled={!approved || uploadingId === project.id} placeholder="e.g. South-facing ground floor plan" className={inputClass} />
                             </label>

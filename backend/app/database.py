@@ -1,4 +1,4 @@
-﻿
+﻿﻿
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     smtp_from_email: str | None = None
     smtp_use_tls: bool = True
     smtp_use_ssl: bool = False
+    google_client_id: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
