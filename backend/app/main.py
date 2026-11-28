@@ -1,10 +1,15 @@
-﻿
+
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from app.routers.company import router as company_router
+from app.routers.architect_management import router as architect_management_router
+from app.routers.architect_documents import router as architect_documents_router
+from app.routers.architect_profile import router as architect_profile_router
 from app.database import engine
 from app.routers.auth import router as auth_router
 from app.routers.architect_signup import router as architect_signup_router
+from app.routers.architect_password_reset import router as architect_password_reset_router
 from app.routers.projects import router as projects_router
 from app.routers.company_projects import router as company_projects_router
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +28,8 @@ app = FastAPI(
 )
 UPLOAD_ROOT = Path(__file__).resolve().parent.parent / "uploads"
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+(UPLOAD_ROOT / "architect_photos").mkdir(parents=True, exist_ok=True)
+app.mount("/uploads/architect_photos", StaticFiles(directory=str(UPLOAD_ROOT / "architect_photos")), name="architect-profile-photos")
 
 
 
@@ -39,7 +46,11 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(architect_signup_router)
+app.include_router(architect_password_reset_router)
 app.include_router(company_router)
+app.include_router(architect_management_router)
+app.include_router(architect_documents_router)
+app.include_router(architect_profile_router)
 app.include_router(projects_router)
 app.include_router(company_projects_router)
 app.include_router(enquiries_router)
