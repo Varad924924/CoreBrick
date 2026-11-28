@@ -1,7 +1,7 @@
 
 from datetime import datetime
 from uuid import UUID, uuid4
-from sqlalchemy import JSON
+from sqlalchemy import JSON, text
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -51,6 +51,18 @@ class User(Base):
         default=True,
         nullable=False,
     )
+    account_status: Mapped[str] = mapped_column(
+        String(20),
+        default="active",
+        server_default="active",
+        nullable=False,
+        index=True,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -85,10 +97,20 @@ class ArchitectProfile(Base):
         default="pending",
         nullable=False,
     )
+    approval_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approval_reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     bio: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
     )
+    city: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    specialization: Mapped[str | None] = mapped_column(String(150), nullable=True, index=True)
+    years_experience: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    professional_details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    profile_photo_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
 
 
 class CustomerProfile(Base):
@@ -558,6 +580,48 @@ class AuditLog(Base):
     )
 
 
+class ArchitectPasswordResetChallenge(Base):
+    """Short-lived, one-time OTP and token state for architect password recovery."""
+
+    __tablename__ = "architect_password_reset_challenges"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    otp_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    resend_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    last_sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reset_token_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    reset_token_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class ArchitectSignupChallenge(Base):
     """Temporary state for architect email verification."""
 
@@ -623,3 +687,72 @@ class ArchitectSignupChallenge(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+
+class ArchitectDocument(Base):
+    __tablename__ = "architect_documents"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    architect_profile_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("architect_profiles.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    stored_filename: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    document_type: Mapped[str] = mapped_column(String(80), nullable=False, default="other")
+    verification_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", server_default="pending"
+    )
+    verification_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    uploaded_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    uploaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ArchitectCompanyNote(Base):
+    __tablename__ = "architect_company_notes"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    architect_profile_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("architect_profiles.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    author_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
+class ArchitectDeletionRequest(Base):
+    __tablename__ = "architect_deletion_requests"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    architect_profile_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("architect_profiles.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    architect_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default=text("'{}'::json"))
+    requested_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
+    dependency_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default=text("'{}'::json"))
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
