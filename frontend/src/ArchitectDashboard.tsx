@@ -1,4 +1,4 @@
-﻿﻿import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import "./corebrick-dashboard-theme.css";
 import ArchitectSignup from "./ArchitectSignup";
 
@@ -39,6 +39,40 @@ type AuthResponse = {
   access_token: string;
   token_type: string;
   user: ArchitectUser;
+};
+
+type ArchitectProfileDetails = {
+  id: string;
+  email: string;
+  full_name: string;
+  phone: string;
+  bio: string | null;
+  city: string | null;
+  specialization: string | null;
+  years_experience: number | null;
+  professional_details: string | null;
+  profile_photo_url: string | null;
+  approval_status: string;
+};
+
+type ArchitectProfileDraft = {
+  full_name: string;
+  phone: string;
+  bio: string;
+  city: string;
+  specialization: string;
+  years_experience: string;
+  professional_details: string;
+};
+
+const EMPTY_ARCHITECT_PROFILE_DRAFT: ArchitectProfileDraft = {
+  full_name: "",
+  phone: "",
+  bio: "",
+  city: "",
+  specialization: "",
+  years_experience: "",
+  professional_details: "",
 };
 
 type NumericValue = number | string | null;
@@ -186,6 +220,7 @@ const EMPTY_PROJECT: ProjectDraft = {
 };
 
 const STATUS_LABELS: Record<string, string> = {
+  draft: "Draft · Not submitted",
   pending_review: "Pending Company review",
   approved: "Approved and published",
   rejected: "Changes requested / rejected",
@@ -296,8 +331,24 @@ function ArchitectDashboard() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showSignup, setShowSignup] = useState(false);
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [forgotStep, setForgotStep] = useState<"request" | "verify" | "reset">("request");
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotOtp, setForgotOtp] = useState("");
+  const [resetToken, setResetToken] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotError, setForgotError] = useState("");
+  const [forgotNotice, setForgotNotice] = useState("");
+  const [passwordResetComplete, setPasswordResetComplete] = useState(false);
   const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_KEY) ?? "");
   const [profile, setProfile] = useState<ArchitectUser | null>(null);
+  const [architectProfile, setArchitectProfile] = useState<ArchitectProfileDetails | null>(null);
+  const [profileDraft, setProfileDraft] = useState<ArchitectProfileDraft>(EMPTY_ARCHITECT_PROFILE_DRAFT);
+  const [isProfileEditorOpen, setIsProfileEditorOpen] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profilePhotoFile, setProfilePhotoFile] = useState<File | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [draft, setDraft] = useState<ProjectDraft>(EMPTY_PROJECT);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
@@ -335,6 +386,8 @@ function ArchitectDashboard() {
   const [deletingProjectId, setDeletingProjectId] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [fileInputVersion, setFileInputVersion] = useState(0);
+  const [projectSearch, setProjectSearch] = useState("");
+  const [projectStatusFilter, setProjectStatusFilter] = useState("all");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const previewUrls = useRef<Record<string, string[]>>({});
@@ -349,6 +402,8 @@ function ArchitectDashboard() {
     if (!token) {
       setProjects([]);
       setProfile(null);
+      setArchitectProfile(null);
+      setProfileDraft(EMPTY_ARCHITECT_PROFILE_DRAFT);
       return;
     }
 
@@ -359,9 +414,10 @@ function ArchitectDashboard() {
       setError("");
       try {
         const headers = { Authorization: `Bearer ${token}` };
-        const [meResponse, projectsResponse] = await Promise.all([
+        const [meResponse, projectsResponse, profileResponse] = await Promise.all([
           fetch(`${API_URL}/auth/me`, { headers, signal: controller.signal }),
           fetch(`${API_URL}/projects/mine`, { headers, signal: controller.signal }),
+          fetch(`${API_URL}/architect/profile`, { headers, signal: controller.signal }),
         ]);
 
         const meData = await readResponse(meResponse);
@@ -392,10 +448,27 @@ function ArchitectDashboard() {
           setNotice("");
         }
 
-        const projectsData = await readResponse(projectsResponse);
+        const [projectsData, profileData] = await Promise.all([
+          readResponse(projectsResponse),
+          readResponse(profileResponse),
+        ]);
         if (!projectsResponse.ok) {
           throw new Error(readableError(projectsData, `Unable to load projects (${projectsResponse.status}).`));
         }
+        if (!profileResponse.ok) {
+          throw new Error(readableError(profileData, `Unable to load architect profile (${profileResponse.status}).`));
+        }
+        const savedProfile = profileData as ArchitectProfileDetails;
+        setArchitectProfile(savedProfile);
+        setProfileDraft({
+          full_name: savedProfile.full_name ?? "",
+          phone: savedProfile.phone ?? "",
+          bio: savedProfile.bio ?? "",
+          city: savedProfile.city ?? "",
+          specialization: savedProfile.specialization ?? "",
+          years_experience: savedProfile.years_experience == null ? "" : String(savedProfile.years_experience),
+          professional_details: savedProfile.professional_details ?? "",
+        });
         setProjects(projectsData as Project[]);
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") return;
@@ -495,6 +568,65 @@ function ArchitectDashboard() {
       throw err;
     }
     return data as T;
+  }
+
+  async function saveArchitectProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!token || savingProfile) return;
+
+    const experience = profileDraft.years_experience.trim()
+      ? Number(profileDraft.years_experience)
+      : null;
+    if (experience !== null && (!Number.isInteger(experience) || experience < 0 || experience > 80)) {
+      setError("Years of experience must be a whole number between 0 and 80.");
+      return;
+    }
+    if (profileDraft.full_name.trim().length < 2 || profileDraft.phone.trim().length < 7) {
+      setError("Enter your full name and a valid phone number.");
+      return;
+    }
+
+    if (profilePhotoFile && (profilePhotoFile.size > 5 * 1024 * 1024 || !["image/jpeg", "image/png", "image/webp"].includes(profilePhotoFile.type))) {
+      setError("Profile photo must be JPEG, PNG or WebP and no larger than 5 MB.");
+      return;
+    }
+
+    setSavingProfile(true);
+    setError("");
+    setNotice("");
+    try {
+      const updated = await apiRequest<ArchitectProfileDetails>("/architect/profile", {
+        method: "PATCH",
+        body: JSON.stringify({
+          full_name: profileDraft.full_name.trim(),
+          phone: profileDraft.phone.trim(),
+          bio: textOrNull(profileDraft.bio),
+          city: textOrNull(profileDraft.city),
+          specialization: textOrNull(profileDraft.specialization),
+          years_experience: experience,
+          professional_details: textOrNull(profileDraft.professional_details),
+        }),
+      });
+
+      let finalProfile = updated;
+      if (profilePhotoFile) {
+        const formData = new FormData();
+        formData.append("file", profilePhotoFile);
+        finalProfile = await apiRequest<ArchitectProfileDetails>("/architect/profile/photo", {
+          method: "POST",
+          body: formData,
+        });
+      }
+
+      setArchitectProfile(finalProfile);
+      setProfilePhotoFile(null);
+      setIsProfileEditorOpen(false);
+      setNotice("Your professional profile has been updated successfully.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update your profile.");
+    } finally {
+      setSavingProfile(false);
+    }
   }
 
   async function loadProjectAssets(projectId: string) {
@@ -796,6 +928,123 @@ function ArchitectDashboard() {
     }
   }
 
+  function openForgotPassword() {
+    setForgotEmail(email.trim());
+    setForgotOtp("");
+    setResetToken("");
+    setNewPassword("");
+    setConfirmNewPassword("");
+    setForgotStep("request");
+    setForgotError("");
+    setForgotNotice("");
+    setPasswordResetComplete(false);
+    setShowSignup(false);
+    setShowForgotPassword(true);
+    setError("");
+  }
+
+  function closeForgotPassword() {
+    setShowForgotPassword(false);
+    setForgotStep("request");
+    setForgotOtp("");
+    setResetToken("");
+    setNewPassword("");
+    setConfirmNewPassword("");
+    setForgotError("");
+    setForgotNotice("");
+  }
+
+  async function requestPasswordReset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (forgotLoading) return;
+    setForgotLoading(true);
+    setForgotError("");
+    setForgotNotice("");
+    try {
+      const response = await fetch(`${API_URL}/auth/architect/password-reset/request-otp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: forgotEmail.trim() }),
+      });
+      const data = await readResponse(response);
+      if (!response.ok) throw new Error(readableError(data, "Unable to send the verification code."));
+      setForgotStep("verify");
+      setForgotNotice("If this email belongs to an active architect account, a 6-digit verification code has been sent. Check your inbox and spam folder.");
+    } catch (err) {
+      setForgotError(err instanceof Error ? err.message : "Unable to send the verification code.");
+    } finally {
+      setForgotLoading(false);
+    }
+  }
+
+  async function verifyPasswordResetOtp(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (forgotLoading) return;
+    setForgotLoading(true);
+    setForgotError("");
+    setForgotNotice("");
+    try {
+      const response = await fetch(`${API_URL}/auth/architect/password-reset/verify-otp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: forgotEmail.trim(), otp: forgotOtp.trim() }),
+      });
+      const data = await readResponse(response);
+      if (!response.ok) throw new Error(readableError(data, "The code is invalid or expired. Request a new code and try again."));
+      const result = data as { reset_token: string; message?: string };
+      setResetToken(result.reset_token);
+      setForgotStep("reset");
+      setForgotOtp("");
+      setForgotNotice("Email verified. Choose a new password below. This reset session expires in 10 minutes.");
+    } catch (err) {
+      setForgotError(err instanceof Error ? err.message : "Unable to verify the code.");
+    } finally {
+      setForgotLoading(false);
+    }
+  }
+
+  async function completePasswordReset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (forgotLoading) return;
+    if (newPassword.length < 12) {
+      setForgotError("Your new password must contain at least 12 characters.");
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setForgotError("The passwords do not match.");
+      return;
+    }
+    setForgotLoading(true);
+    setForgotError("");
+    setForgotNotice("");
+    try {
+      const response = await fetch(`${API_URL}/auth/architect/password-reset/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: forgotEmail.trim(),
+          reset_token: resetToken,
+          new_password: newPassword,
+        }),
+      });
+      const data = await readResponse(response);
+      if (!response.ok) throw new Error(readableError(data, "Unable to reset the password. Please verify your email again."));
+      setPassword("");
+      setEmail(forgotEmail.trim());
+      setForgotNotice("Your password has been changed successfully. Sign in using your new password.");
+      setForgotStep("request");
+      setResetToken("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setForgotOtp("");
+      setPasswordResetComplete(true);
+    } catch (err) {
+      setForgotError(err instanceof Error ? err.message : "Unable to reset the password.");
+    } finally {
+      setForgotLoading(false);
+    }
+  }
+
   async function uploadCreationImageBatch(
     projectId: string,
     images: CreationImageDraft[],
@@ -893,6 +1142,55 @@ function ArchitectDashboard() {
       setRefreshKey((current) => current + 1);
     } finally {
       setUploadingId("");
+    }
+  }
+
+  async function saveProjectDraft() {
+    if (!token || savingProject || pendingCreationUpload) return;
+    setSavingProject(true);
+    setError("");
+    setNotice("");
+    try {
+      const isEditing = Boolean(editingProjectId);
+      const savedProject = await apiRequest<Project>(
+        isEditing ? `/projects/${editingProjectId}/draft` : "/projects/drafts",
+        {
+          method: isEditing ? "PUT" : "POST",
+          body: JSON.stringify(draftToPayload(draft)),
+        },
+      );
+
+      if (!isEditing && creationImages.length > 0) {
+        const chosenImages = creationImages;
+        const result = await uploadCreationImageBatch(savedProject.id, chosenImages);
+        // Image upload endpoints may mark a project for review; restore draft state
+        // after the batch so an incomplete project remains private.
+        await apiRequest<Project>(`/projects/${savedProject.id}/draft`, {
+          method: "PUT",
+          body: JSON.stringify(draftToPayload(draft)),
+        });
+        setCreationImages([]);
+        setFileInputVersion((current) => current + 1);
+        if (result.remaining.length > 0) {
+          setPendingCreationUpload({ projectId: savedProject.id, images: result.remaining });
+          setError(`Draft saved. ${result.uploaded} image(s) uploaded; ${result.remaining.length} remain queued. Retry the remaining uploads below.`);
+        } else {
+          setNotice(`Draft saved with ${chosenImages.length} image(s). It is private and has not been sent for Company review.`);
+          await loadProjectAssets(savedProject.id);
+        }
+      } else {
+        setNotice("Draft saved. It is private and will not appear in the public project gallery until you submit it for Company review.");
+      }
+
+      setDraft(EMPTY_PROJECT);
+      setEditingProjectId(null);
+      setIsProjectFormOpen(false);
+      setExpandedProjectId(savedProject.id);
+      setRefreshKey((current) => current + 1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save project draft.");
+    } finally {
+      setSavingProject(false);
     }
   }
 
@@ -1177,6 +1475,80 @@ if (floorId) {
     setPassword("");
   }
 
+  if (!token && showForgotPassword) {
+    return (
+      <main className="architect-login-screen flex min-h-screen items-center justify-center bg-stone-100 px-5 py-12">
+        <section className="architect-login-card w-full max-w-md rounded-2xl border border-stone-200 bg-white p-8 shadow-xl">
+          <a href="/" className="text-xl font-black tracking-tight">CORE <span className="text-amber-700">BRICK.</span></a>
+          <p className="mt-8 text-xs font-bold uppercase tracking-[0.25em] text-amber-800">Architect portal · Account recovery</p>
+          <h1 className="mt-3 text-3xl font-semibold">
+            {passwordResetComplete ? "Password updated" : forgotStep === "request" ? "Forgot password?" : forgotStep === "verify" ? "Verify your email" : "Create a new password"}
+          </h1>
+          <div className="mt-5 flex items-center gap-2" aria-label="Password reset progress">
+            {["Email", "Verify", "New password"].map((step, index) => {
+              const activeIndex = passwordResetComplete ? 3 : forgotStep === "request" ? 0 : forgotStep === "verify" ? 1 : 2;
+              const complete = index < activeIndex;
+              const active = index === activeIndex;
+              return <div key={step} className={`flex-1 rounded-full px-2 py-2 text-center text-xs font-semibold ${complete ? "bg-emerald-100 text-emerald-800" : active ? "bg-amber-100 text-amber-900" : "bg-stone-100 text-stone-500"}`}>{step}</div>;
+            })}
+          </div>
+          <p className="mt-5 text-sm leading-6 text-stone-600">
+            {passwordResetComplete
+              ? "Your architect account is secure with the new password. Return to sign in to continue."
+              : forgotStep === "request"
+                ? "Enter the email address linked to your architect account. We’ll send a one-time verification code."
+                : forgotStep === "verify"
+                  ? `Enter the 6-digit code sent to ${forgotEmail}. The code is valid for 10 minutes. Verify it once to continue.`
+                  : "Your email is verified. Set a strong password with at least 12 characters."}
+          </p>
+          {forgotError && <p role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{forgotError}</p>}
+          {forgotNotice && <p role="status" className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">{forgotNotice}</p>}
+
+          {!passwordResetComplete && forgotStep === "request" && (
+            <form onSubmit={requestPasswordReset}>
+              <label className={`${labelClass} mt-6`}>Architect email
+                <input required type="email" autoComplete="email" value={forgotEmail} onChange={(event) => setForgotEmail(event.target.value)} className={inputClass} placeholder="name@example.com" />
+              </label>
+              <button type="submit" disabled={forgotLoading} className={`${buttonClass} mt-6 w-full`}>
+                {forgotLoading ? "Sending code…" : "Send verification code"}
+              </button>
+            </form>
+          )}
+
+          {!passwordResetComplete && forgotStep === "verify" && (
+            <form onSubmit={verifyPasswordResetOtp}>
+              <label className={`${labelClass} mt-6`}>6-digit verification code
+                <input required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={forgotOtp} onChange={(event) => setForgotOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} className={`${inputClass} text-center text-xl tracking-[0.35em]`} placeholder="000000" />
+              </label>
+              <button type="submit" disabled={forgotLoading || forgotOtp.length !== 6} className={`${buttonClass} mt-6 w-full`}>
+                {forgotLoading ? "Verifying…" : "Verify code and continue"}
+              </button>
+              <button type="button" onClick={() => { setForgotStep("request"); setForgotOtp(""); setForgotError(""); setForgotNotice("Request a fresh code. If you just requested one, wait 60 seconds before resending."); }} className="mt-3 w-full rounded-lg border border-stone-300 px-4 py-3 text-sm font-semibold text-stone-700 transition hover:bg-stone-50">Change email / request another code</button>
+            </form>
+          )}
+
+          {!passwordResetComplete && forgotStep === "reset" && (
+            <form onSubmit={completePasswordReset}>
+              <label className={`${labelClass} mt-6`}>New password
+                <input required type="password" autoComplete="new-password" minLength={12} maxLength={128} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className={inputClass} placeholder="At least 12 characters" />
+              </label>
+              <label className={`${labelClass} mt-4`}>Confirm new password
+                <input required type="password" autoComplete="new-password" minLength={12} maxLength={128} value={confirmNewPassword} onChange={(event) => setConfirmNewPassword(event.target.value)} className={inputClass} placeholder="Enter the same password again" />
+              </label>
+              <button type="submit" disabled={forgotLoading || !newPassword || !confirmNewPassword} className={`${buttonClass} mt-6 w-full`}>
+                {forgotLoading ? "Updating password…" : "Update password"}
+              </button>
+            </form>
+          )}
+
+          <button type="button" onClick={() => { closeForgotPassword(); setPasswordResetComplete(false); }} className="mt-5 w-full text-center text-sm font-semibold text-stone-600 hover:text-amber-800">
+            {passwordResetComplete ? "Return to sign in" : "Back to sign in"}
+          </button>
+        </section>
+      </main>
+    );
+  }
+
   if (!token && showSignup) {
     return (
       <ArchitectSignup
@@ -1199,8 +1571,8 @@ if (floorId) {
 
   if (!token) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-stone-100 px-5 py-12">
-        <form onSubmit={login} className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-8 shadow-xl">
+      <main className="architect-login-screen flex min-h-screen items-center justify-center bg-stone-100 px-5 py-12">
+        <form onSubmit={login} className="architect-login-card w-full max-w-md rounded-2xl border border-stone-200 bg-white p-8 shadow-xl">
           <a href="/" className="text-xl font-black tracking-tight">CORE <span className="text-amber-700">BRICK.</span></a>
           <p className="mt-8 text-xs font-bold uppercase tracking-[0.25em] text-amber-800">Architect portal</p>
           <h1 className="mt-3 text-3xl font-semibold">Sign in</h1>
@@ -1212,7 +1584,10 @@ if (floorId) {
           <label className={`${labelClass} mt-4`}>Password
             <input required type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} className={inputClass} />
           </label>
-          <button type="submit" disabled={loginLoading} className={`${buttonClass} mt-6 w-full`}>
+          <div className="mt-3 text-right">
+            <button type="button" onClick={openForgotPassword} className="text-sm font-semibold text-amber-800 underline-offset-4 hover:underline">Forgot password?</button>
+          </div>
+          <button type="submit" disabled={loginLoading} className={`${buttonClass} mt-5 w-full`}>
             {loginLoading ? "Signing in..." : "Sign in to Architect Portal"}
           </button>
           <button
@@ -1233,11 +1608,36 @@ if (floorId) {
 
   const approved = profile?.architect_approval_status === "approved";
   const activeProject = projects.find((project) => project.id === editingProjectId);
+  const filteredProjects = projects.filter((project) => {
+    const query = projectSearch.trim().toLowerCase();
+    const matchesQuery = !query || [
+      project.title, project.city, project.state, project.property_type,
+      project.building_type ?? "", project.architectural_style ?? "",
+    ].some((value) => value.toLowerCase().includes(query));
+    const matchesStatus = projectStatusFilter === "all" || project.status === projectStatusFilter;
+    return matchesQuery && matchesStatus;
+  });
+  const pendingProjects = projects.filter((item) => item.status === "pending_review").length;
+  const approvedProjects = projects.filter((item) => item.status === "approved").length;
+  const rejectedProjects = projects.filter((item) => item.status === "rejected").length;
+  const profileChecklist = [
+    { label: "Full name", complete: Boolean(architectProfile?.full_name?.trim()) },
+    { label: "Phone number", complete: Boolean(architectProfile?.phone?.trim()) },
+    { label: "Profile photo", complete: Boolean(architectProfile?.profile_photo_url) },
+    { label: "City", complete: Boolean(architectProfile?.city?.trim()) },
+    { label: "Specialization", complete: Boolean(architectProfile?.specialization?.trim()) },
+    { label: "Years of experience", complete: architectProfile?.years_experience != null },
+    { label: "Professional bio", complete: Boolean(architectProfile?.bio?.trim()) },
+    { label: "Professional details", complete: Boolean(architectProfile?.professional_details?.trim()) },
+  ];
+  const profileCompletion = profileChecklist.filter((item) => item.complete).length;
+  const profileCompletionPercent = Math.round((profileCompletion / profileChecklist.length) * 100);
+  const incompleteProfileItems = profileChecklist.filter((item) => !item.complete);
 
   return (
-    <main className="corebrick-dashboard min-h-screen bg-stone-100 text-stone-900">
-      <header className="border-b border-stone-200 bg-white">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-5 py-5 md:px-8">
+    <main className="corebrick-dashboard architect-portal min-h-screen bg-stone-100 text-stone-900">
+      <header className="architect-topbar">
+        <div className="architect-topbar-inner mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-5 py-5 md:px-8">
           <div>
             <a href="/" className="text-xl font-black tracking-tight">CORE <span className="text-amber-700">BRICK.</span></a>
             <p className="mt-1 text-sm text-stone-500">Architect project workspace</p>
@@ -1259,13 +1659,33 @@ if (floorId) {
         </div>
       </header>
 
-      <section className="mx-auto max-w-7xl px-5 py-10 md:px-8">
-        <p className="text-xs font-bold uppercase tracking-[0.25em] text-amber-800">Architect workspace</p>
-        <h1 className="mt-3 text-3xl font-semibold md:text-4xl">My Projects</h1>
-        <p className="mt-3 max-w-3xl leading-7 text-stone-600">Enter a complete project record, manage multiple categorized images, and resubmit changes for Company review.</p>
+      <section className="architect-content mx-auto max-w-7xl px-5 py-10 md:px-8">
+        <div className="architect-hero">
+          <div className="architect-hero-copy">
+            <p className="architect-eyebrow">ARCHITECT STUDIO · WORKSPACE</p>
+            <h1>Design. Manage. Showcase.</h1>
+            <p>One workspace for your professional profile, architectural projects and publication journey.</p>
+            <div className="architect-hero-meta">
+              <span className={`architect-status-pill ${approved ? "is-approved" : "is-pending"}`}>
+                <i /> {profile?.architect_approval_status ?? "Approval status unavailable"}
+              </span>
+              <span>{projects.length} project{projects.length === 1 ? "" : "s"} in your portfolio</span>
+            </div>
+          </div>
+          <div className="architect-hero-art" aria-hidden="true">
+            <div className="architect-art-frame architect-art-frame-back" />
+            <div className="architect-art-frame architect-art-frame-front">
+              <span className="architect-art-sun" />
+              <span className="architect-art-line architect-art-line-one" />
+              <span className="architect-art-line architect-art-line-two" />
+              <span className="architect-art-building"><i /><i /><i /><i /><b /></span>
+            </div>
+            <span className="architect-art-caption">YOUR DESIGN PORTFOLIO</span>
+          </div>
+        </div>
 
         {profile && (
-          <div className="mt-6 rounded-xl border border-stone-200 bg-white p-5">
+          <div className="architect-account-strip mt-6 rounded-xl border border-stone-200 bg-white p-5">
             <p className="text-sm text-stone-500">Signed in as</p>
             <p className="mt-1 font-semibold">{profile.email}</p>
             <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
@@ -1281,18 +1701,171 @@ if (floorId) {
         {notice && <p role="status" className="mt-5 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-900">{notice}</p>}
         {error && <p role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">{error}</p>}
 
-        <div className="mt-8 grid gap-4 sm:grid-cols-3">
-          <div className="dashboard-stat rounded-xl border border-stone-200 bg-white p-5"><p className="text-sm text-stone-500">Total projects</p><p className="mt-2 text-3xl font-semibold">{projects.length}</p></div>
-          <div className="dashboard-stat rounded-xl border border-stone-200 bg-white p-5"><p className="text-sm text-stone-500">Pending review</p><p className="mt-2 text-3xl font-semibold">{projects.filter((item) => item.status === "pending_review").length}</p></div>
-          <div className="dashboard-stat rounded-xl border border-stone-200 bg-white p-5"><p className="text-sm text-stone-500">Approved and published</p><p className="mt-2 text-3xl font-semibold">{projects.filter((item) => item.status === "approved").length}</p></div>
-        </div>
+        <section id="architect-profile" className="architect-profile-card mt-8 rounded-2xl border border-stone-200 bg-white p-5 md:p-7">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="flex min-w-0 items-center gap-4">
+              {architectProfile?.profile_photo_url ? (
+                <img
+                  src={`${API_URL}${architectProfile.profile_photo_url}`}
+                  alt={`${architectProfile.full_name} profile`}
+                  className="architect-avatar h-20 w-20 rounded-full border border-stone-200 object-cover"
+                />
+              ) : (
+                <div className="architect-avatar architect-avatar-fallback flex h-20 w-20 items-center justify-center rounded-full bg-amber-50 text-2xl font-semibold text-amber-800">
+                  {(architectProfile?.full_name || profile?.email || "A").slice(0, 1).toUpperCase()}
+                </div>
+              )}
+              <div className="min-w-0">
+                <p className="text-xs font-bold uppercase tracking-widest text-amber-800">Architect profile</p>
+                <h2 className="mt-1 text-xl font-semibold">{architectProfile?.full_name || "Complete your profile"}</h2>
+                <p className="mt-1 text-sm text-stone-500">{architectProfile?.specialization || "Add your specialization"}{architectProfile?.city ? ` · ${architectProfile.city}` : ""}</p>
+                <p className="mt-1 text-xs text-stone-500">{architectProfile?.email || profile?.email}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsProfileEditorOpen((current) => !current)}
+              className={secondaryButtonClass}
+              aria-expanded={isProfileEditorOpen}
+            >
+              {isProfileEditorOpen ? "Close profile editor" : "Edit my profile"}
+            </button>
+          </div>
+          <div className="architect-profile-completion">
+            <div><span>Profile completeness</span><strong>{profileCompletionPercent}%</strong></div>
+            <div className="architect-completion-track"><i style={{ width: `${profileCompletionPercent}%` }} /></div>
+            <small>{profileCompletion} of {profileChecklist.length} profile details completed. Complete the remaining items to present a stronger professional portfolio.</small>
+          </div>
 
-        <section className="mt-8 rounded-2xl border border-stone-200 bg-white p-5 md:p-7">
+          {!isProfileEditorOpen && (
+            <div className="mt-4 rounded-xl border border-stone-200 bg-stone-50 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-stone-800">Profile completion checklist</h3>
+                <span className="text-xs font-medium text-stone-500">{incompleteProfileItems.length} remaining</span>
+              </div>
+              {incompleteProfileItems.length > 0 ? (
+                <>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                    {incompleteProfileItems.map((item) => (
+                      <div key={item.label} className="flex items-center gap-2 text-sm text-stone-600">
+                        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-amber-100 text-xs font-bold text-amber-800" aria-hidden="true">!</span>
+                        {item.label}
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsProfileEditorOpen(true)}
+                    className={`${secondaryButtonClass} mt-4`}
+                  >
+                    Complete missing details
+                  </button>
+                </>
+              ) : (
+                <p className="mt-2 text-sm text-green-800">Your professional profile is complete.</p>
+              )}
+            </div>
+          )}
+
+          {!isProfileEditorOpen && (
+            <div className="mt-5 grid gap-4 border-t border-stone-100 pt-5 sm:grid-cols-2 lg:grid-cols-3">
+              <div><p className="text-xs text-stone-500">Phone</p><p className="mt-1 font-medium">{architectProfile?.phone || "Not added"}</p></div>
+              <div><p className="text-xs text-stone-500">Experience</p><p className="mt-1 font-medium">{architectProfile?.years_experience == null ? "Not added" : `${architectProfile.years_experience} years`}</p></div>
+              <div><p className="text-xs text-stone-500">Specialization</p><p className="mt-1 font-medium">{architectProfile?.specialization || "Not added"}</p></div>
+              <div className="sm:col-span-2 lg:col-span-3"><p className="text-xs text-stone-500">Professional bio</p><p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-stone-700">{architectProfile?.bio || "Add a short professional introduction to help the Company understand your work."}</p></div>
+              <div className="sm:col-span-2 lg:col-span-3"><p className="text-xs text-stone-500">Professional details</p><p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-stone-700">{architectProfile?.professional_details || "Add qualifications, registration details, skills, software expertise, or other professional information."}</p></div>
+            </div>
+          )}
+
+          {isProfileEditorOpen && (
+            <form onSubmit={saveArchitectProfile} className="mt-6 space-y-5 border-t border-stone-100 pt-5">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label className={labelClass}>Full name *
+                  <input required minLength={2} maxLength={150} value={profileDraft.full_name} onChange={(e) => setProfileDraft({ ...profileDraft, full_name: e.target.value })} className={inputClass} />
+                </label>
+                <label className={labelClass}>Phone number *
+                  <input required minLength={7} maxLength={30} value={profileDraft.phone} onChange={(e) => setProfileDraft({ ...profileDraft, phone: e.target.value })} className={inputClass} />
+                </label>
+                <label className={labelClass}>City
+                  <input maxLength={100} value={profileDraft.city} onChange={(e) => setProfileDraft({ ...profileDraft, city: e.target.value })} className={inputClass} placeholder="e.g. Pune" />
+                </label>
+                <label className={labelClass}>Specialization
+                  <input maxLength={150} value={profileDraft.specialization} onChange={(e) => setProfileDraft({ ...profileDraft, specialization: e.target.value })} className={inputClass} placeholder="e.g. Residential architecture, Interior design" />
+                </label>
+                <label className={labelClass}>Years of experience
+                  <input type="number" min="0" max="80" step="1" value={profileDraft.years_experience} onChange={(e) => setProfileDraft({ ...profileDraft, years_experience: e.target.value })} className={inputClass} />
+                </label>
+                <label className={labelClass}>Profile photo
+                  <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setProfilePhotoFile(e.target.files?.[0] ?? null)} className={inputClass} />
+                  <span className="mt-1 block text-xs font-normal text-stone-500">JPEG, PNG or WebP; maximum 5 MB.</span>
+                </label>
+                <label className={`${labelClass} sm:col-span-2`}>Professional bio
+                  <textarea rows={3} maxLength={5000} value={profileDraft.bio} onChange={(e) => setProfileDraft({ ...profileDraft, bio: e.target.value })} className={inputClass} placeholder="Introduce yourself and describe your design approach." />
+                </label>
+                <label className={`${labelClass} sm:col-span-2`}>Professional details
+                  <textarea rows={5} maxLength={10000} value={profileDraft.professional_details} onChange={(e) => setProfileDraft({ ...profileDraft, professional_details: e.target.value })} className={inputClass} placeholder="Add qualifications, registration number, professional memberships, skills, software expertise, and relevant experience." />
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <button type="submit" disabled={savingProfile} className={buttonClass}>{savingProfile ? "Saving profile..." : "Save profile"}</button>
+                <button type="button" disabled={savingProfile} onClick={() => { setIsProfileEditorOpen(false); setProfilePhotoFile(null); if (architectProfile) setProfileDraft({ full_name: architectProfile.full_name ?? "", phone: architectProfile.phone ?? "", bio: architectProfile.bio ?? "", city: architectProfile.city ?? "", specialization: architectProfile.specialization ?? "", years_experience: architectProfile.years_experience == null ? "" : String(architectProfile.years_experience), professional_details: architectProfile.professional_details ?? "" }); }} className={secondaryButtonClass}>Cancel</button>
+              </div>
+            </form>
+          )}
+        </section>
+
+        <section id="architect-overview" className="mt-8">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <p className="architect-eyebrow">WORKSPACE SUMMARY</p>
+              <h2 className="text-2xl font-semibold">Dashboard overview</h2>
+              <p className="mt-1 text-sm text-stone-600">A quick view of your portfolio and Company review progress.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsProfileEditorOpen(true)}
+              className={secondaryButtonClass}
+            >
+              Update professional profile
+            </button>
+          </div>
+          <div className="architect-metrics-grid grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="architect-metric-card dashboard-stat rounded-xl border border-stone-200 bg-white p-5"><p className="text-sm text-stone-500">Total projects</p><p className="mt-2 text-3xl font-semibold">{projects.length}</p></div>
+          <div className="architect-metric-card dashboard-stat rounded-xl border border-stone-200 bg-white p-5"><p className="text-sm text-stone-500">Pending review</p><p className="mt-2 text-3xl font-semibold">{pendingProjects}</p><span className="architect-metric-footnote">Awaiting Company review</span></div>
+          <div className="architect-metric-card dashboard-stat dashboard-stat-public rounded-xl border border-stone-200 bg-white p-5"><p className="text-sm text-stone-500">Approved and published</p><p className="mt-2 text-3xl font-semibold">{approvedProjects}</p><span className="architect-metric-footnote">Visible in public catalogue</span></div>
+          <div className="architect-metric-card dashboard-stat dashboard-stat-rejected rounded-xl border border-stone-200 bg-white p-5"><p className="text-sm text-stone-500">Changes requested</p><p className="mt-2 text-3xl font-semibold">{rejectedProjects}</p><span className="architect-metric-footnote">Review feedback to address</span></div>
+          </div>
+        </section>
+
+        <section className="mt-5 grid gap-4 md:grid-cols-2">
+          <div className="rounded-2xl border border-stone-200 bg-white p-5">
+            <p className="text-xs font-bold uppercase tracking-widest text-amber-800">Account readiness</p>
+            <h3 className="mt-2 text-lg font-semibold">{approved ? "Your account is approved" : "Account approval in progress"}</h3>
+            <p className="mt-2 text-sm leading-6 text-stone-600">
+              {approved
+                ? "You can create and manage project submissions. Each project remains subject to separate Company review before publication."
+                : "Your account must receive Company approval before project creation and editing are available."}
+            </p>
+          </div>
+          <div className="rounded-2xl border border-stone-200 bg-white p-5">
+            <p className="text-xs font-bold uppercase tracking-widest text-amber-800">Profile readiness</p>
+            <div className="mt-2 flex items-end justify-between gap-3">
+              <h3 className="text-lg font-semibold">Professional profile</h3>
+              <strong className="text-xl tabular-nums">{profileCompletionPercent}%</strong>
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-stone-100">
+              <div className="h-full rounded-full bg-amber-700 transition-all" style={{ width: `${profileCompletionPercent}%` }} />
+            </div>
+            <p className="mt-2 text-sm text-stone-600">{incompleteProfileItems.length === 0 ? "All profile details are complete." : `${incompleteProfileItems.length} details still need attention.`}</p>
+          </div>
+        </section>
+
+        <section className="architect-submit-card mt-8 rounded-2xl border border-stone-200 bg-white p-5 md:p-7">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
               <p className="text-xs font-bold uppercase tracking-widest text-amber-800">{editingProjectId ? "Project update" : "New submission"}</p>
               <h2 className="mt-2 text-xl font-semibold md:text-2xl">{editingProjectId ? `Edit ${activeProject?.title ?? "project"}` : "Create a complete project"}</h2>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">{editingProjectId ? "Update the details below. Changes will return the project to Company review." : "The project form is tucked away to keep your workspace clear. Open it when you are ready to submit a new project."}</p>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">{editingProjectId ? "Update the details below. Changes will return the project to Company review." : "Save incomplete work as a private draft, or submit a completed project for Company review."}</p>
             </div>
             <button
               type="button"
@@ -1550,6 +2123,14 @@ if (floorId) {
             )}
 
             <div className="flex flex-wrap gap-3 border-t border-stone-200 pt-6">
+              <button
+                type="button"
+                onClick={() => void saveProjectDraft()}
+                disabled={!approved || savingProject || Boolean(pendingCreationUpload)}
+                className={secondaryButtonClass}
+              >
+                {savingProject ? "Saving..." : "Save as draft"}
+              </button>
               <button type="submit" disabled={!approved || savingProject || Boolean(pendingCreationUpload)} className={buttonClass}>
                 {savingProject ? (creationImages.length > 0 && !editingProjectId ? "Creating project and uploading imagesâ€¦" : "Saving project...") : editingProjectId ? "Save and resubmit for review" : "Create project and submit for review"}
               </button>
@@ -1560,17 +2141,37 @@ if (floorId) {
           )}
         </section>
 
-        <section className="mt-10">
-          <div className="flex flex-wrap items-end justify-between gap-4">
-            <div><h2 className="text-2xl font-semibold">My submitted projects</h2><p className="mt-2 text-sm text-stone-600">Only your own projects are listed. Updates and new images require Company review before publication.</p></div>
-            <span className="text-sm text-stone-500">{projects.length} total</span>
+        <section className="architect-projects-section mt-10">
+          <div className="architect-section-heading flex flex-wrap items-end justify-between gap-4">
+            <div><p className="architect-eyebrow">PORTFOLIO MANAGEMENT</p><h2 className="text-2xl font-semibold">My projects</h2><p className="mt-2 text-sm text-stone-600">Manage your submissions, update project details and track Company review.</p></div>
+            <span className="architect-total-count">{projects.length} total projects</span>
+          </div>
+
+          <div className="architect-project-toolbar">
+            <label className="architect-project-search">
+              <span aria-hidden="true">⌕</span>
+              <input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Search by project, city, property type or style..." aria-label="Search projects" />
+              {projectSearch && <button type="button" onClick={() => setProjectSearch("")} aria-label="Clear project search">×</button>}
+            </label>
+            <label className="architect-project-filter">
+              <span>Project status</span>
+              <select value={projectStatusFilter} onChange={(event) => setProjectStatusFilter(event.target.value)}>
+                <option value="all">All projects</option>
+                <option value="draft">Drafts</option>
+                <option value="pending_review">Pending review</option>
+                <option value="approved">Approved / published</option>
+                <option value="rejected">Changes requested</option>
+              </select>
+            </label>
+            <span className="architect-results-count">{filteredProjects.length} of {projects.length} shown</span>
           </div>
 
           {projectsLoading && <p className="mt-6 text-stone-600">Loading projects...</p>}
-          {!projectsLoading && projects.length === 0 && !error && <div className="mt-5 rounded-xl border border-dashed border-stone-300 bg-white p-10 text-center text-stone-600">You haven't submitted any projects yet.</div>}
+          {!projectsLoading && projects.length === 0 && !error && <div className="architect-empty-state mt-5"><span>⌂</span><strong>Your portfolio starts here</strong><p>You haven't submitted any projects yet. Create your first project to begin building your public portfolio.</p></div>}
+          {!projectsLoading && projects.length > 0 && filteredProjects.length === 0 && <div className="architect-empty-state mt-5"><span>⌕</span><strong>No matching projects</strong><p>Try a different search term or change the status filter.</p><button type="button" onClick={() => { setProjectSearch(""); setProjectStatusFilter("all"); }}>Clear filters</button></div>}
 
-          <div className="mt-5 grid grid-cols-1 items-start gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {projects.map((project) => {
+          <div className="architect-project-grid mt-5 grid grid-cols-1 items-start gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {filteredProjects.map((project) => {
               const images = imagesByProject[project.id] ?? [];
               const floors = floorsByProject[project.id] ?? [];
               const isExpanded = expandedProjectId === project.id;
@@ -1578,9 +2179,9 @@ if (floorId) {
               return (
                 <article
                   key={project.id}
-                  className={`min-w-0 overflow-hidden rounded-2xl border border-stone-200 bg-white p-4 shadow-sm md:p-5 ${isExpanded ? "sm:col-span-2 lg:col-span-3 xl:col-span-4" : ""}`}
+                  className={`architect-project-card min-w-0 overflow-hidden rounded-2xl border border-stone-200 bg-white p-4 shadow-sm md:p-5 ${isExpanded ? "sm:col-span-2 lg:col-span-3 xl:col-span-4 is-expanded" : ""}`}
                 >
-                  <div className="-mx-4 -mt-4 mb-4 overflow-hidden rounded-t-2xl bg-stone-100 md:-mx-5 md:-mt-5">
+                  <div className="architect-project-cover -mx-4 -mt-4 mb-4 overflow-hidden rounded-t-2xl bg-stone-100 md:-mx-5 md:-mt-5">
                     {coverImageUrl ? (
                       <img
                         src={coverImageUrl}
