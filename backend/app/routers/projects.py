@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.dependencies import get_current_user
 from app.models import ArchitectProfile, Project, User
-from app.schemas import ProjectCreate, ProjectOut
+from app.schemas import ProjectCreate, ProjectDraftSave, ProjectOut
 
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
@@ -106,6 +106,80 @@ def create_project(
         db.rollback()
         raise
 
+
+
+
+@router.post("/drafts", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
+def create_project_draft(
+    payload: ProjectDraftSave,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create an incomplete, private project draft for its owning architect."""
+    profile = get_approved_architect_profile(db, user)
+    values = payload.model_dump(exclude_unset=True)
+    project = Project(
+        architect_profile_id=profile.id,
+        title=(values.get("title") or "").strip() or "Untitled project",
+        description=values.get("description"),
+        property_type=(values.get("property_type") or "").strip() or "Residential",
+        city=(values.get("city") or "").strip() or "Not specified",
+        state=(values.get("state") or "").strip() or "Not specified",
+        status="draft",
+    )
+    editable_fields = {
+        "area_sqft", "building_type", "architectural_style", "bhk",
+        "facing", "entrance_facing", "plot_area_sqft", "plot_width_ft",
+        "plot_length_ft", "carpet_area_sqft", "floor_count",
+        "bedroom_count", "bathroom_count", "kitchen_count", "balcony_count",
+        "parking_spaces", "estimated_cost_min", "estimated_cost_max", "amenities",
+    }
+    for field in editable_fields:
+        if field in values:
+            setattr(project, field, values[field])
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.put("/{project_id}/draft", response_model=ProjectOut)
+def save_project_draft(
+    project_id: UUID,
+    payload: ProjectDraftSave,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Save partial edits without sending the project to Company review."""
+    profile = get_approved_architect_profile(db, user)
+    project = db.get(Project, project_id)
+    if project is None or project.status == "deleted":
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.architect_profile_id != profile.id:
+        raise HTTPException(status_code=403, detail="You can edit only your own projects")
+
+    values = payload.model_dump(exclude_unset=True)
+    for field, value in values.items():
+        if field in {"title", "property_type", "city", "state"}:
+            value = (value or "").strip()
+        if field == "description":
+            value = value.strip() if value else None
+        if field in {"title", "property_type", "city", "state"} and not value:
+            value = {
+                "title": "Untitled project",
+                "property_type": "Residential",
+                "city": "Not specified",
+                "state": "Not specified",
+            }[field]
+        setattr(project, field, value)
+
+    project.status = "draft"
+    project.reviewed_by_user_id = None
+    project.reviewed_at = None
+    project.review_notes = None
+    db.commit()
+    db.refresh(project)
+    return project
 
 @router.get("/mine", response_model=list[ProjectOut])
 def list_my_projects(
